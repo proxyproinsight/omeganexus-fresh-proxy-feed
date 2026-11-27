@@ -1,0 +1,59 @@
+name: Update free proxy lists
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-lists
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch delayed pool and rebuild lists
+        env:
+          OMEGA_FREE_KEY: ${{ secrets.OMEGA_FREE_KEY }}
+          BASE: https://rampes.tail8c39d9.ts.net:8443
+        run: |
+          set -euo pipefail
+          mkdir -p lists
+          fetch() {
+            local out code
+            out="$(mktemp)"
+            code="$(curl -s -o "$out" -w '%{http_code}' --max-time 60 -H "X-API-Key: $OMEGA_FREE_KEY" "$BASE$1")"
+            if [ "$code" != "200" ]; then
+              echo "fetch of $1 failed with HTTP $code" >&2
+              exit 1
+            fi
+            if [ "$3" = "bare" ]; then
+              sed -E 's#^[a-z0-9]+://##' "$out" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$' | sort -u > "$2" || true
+            else
+              grep -E '^[a-z0-9]+://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$' "$out" | sort -u > "$2" || true
+            fi
+            rm -f "$out"
+            echo "$2: $(grep -c . "$2" || true) entries"
+          }
+          fetch "/api/best/export?limit=200" lists/all.txt scheme
+          fetch "/api/best/export?protocol=http&limit=200" lists/http.txt bare
+          fetch "/api/best/export?protocol=socks4&limit=200" lists/socks4.txt bare
+          fetch "/api/best/export?protocol=socks5&limit=200" lists/socks5.txt bare
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lists/
+          if git diff --cached --quiet; then
+            echo "Lists unchanged"
+          else
+            git commit -m "Update free lists"
+            git push
+          fi
